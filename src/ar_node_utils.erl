@@ -797,7 +797,10 @@ calculate_delay(_Bytes) ->
 calculate_delay(Bytes) ->
 	0.
 -else.
+%% Returns a delay in milliseconds to wait before including a transaction into a block.
+%% The delay is computed as 30 seconds + a function of data size with a conservative assumption of 100 kbps.
 calculate_delay(Bytes) ->
-	30000 + ((Bytes * 300) div 1000).
+	Seconds = 30 + Bytes div (100000 div 8),
+	Seconds * 1000.
 -endif.
 -endif.
