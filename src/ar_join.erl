@@ -64,8 +64,12 @@ do_join(Node, RawPeers, NewB) ->
 			),
 			ar_miner_log:joining(),
 			ar_randomx_state:init(NewB#block.hash_list, Peers),
-			get_block_and_trail(Peers, NewB, NewB#block.hash_list),
-			Node ! {fork_recovered, [NewB#block.indep_hash|NewB#block.hash_list]},
+			RecentTXs = get_block_and_trail(Peers, NewB, NewB#block.hash_list),
+			Node ! {
+				fork_recovered,
+				[NewB#block.indep_hash|NewB#block.hash_list],
+				RecentTXs
+			},
 			join_peers(Peers),
 			ar_miner_log:joined(),
 			spawn(fun() -> fill_to_capacity(ar_manage_peers:get_more_peers(Peers), NewB#block.hash_list) end)
@@ -166,21 +170,35 @@ join_peers(Peer) -> ar_http_iface_client:add_peer(Peer).
 %% blocks and recall blocks. Alternatively, if the blocklist is shorter than
 %% ?STORE_BLOCKS_BEHIND_CURRENT, simply get all existing blocks and recall blocks
 get_block_and_trail(_Peers, NewB, []) ->
-	ar_storage:write_block(NewB#block { txs = [T#tx.id || T <- NewB#block.txs] });
+	ar_storage:write_block(NewB#block { txs = [T#tx.id || T <- NewB#block.txs] }),
+	[get_block_txids(NewB)];
 get_block_and_trail(Peers, NewB, HashList) ->
-	get_block_and_trail(Peers, NewB, ?STORE_BLOCKS_BEHIND_CURRENT, HashList).
-get_block_and_trail(_, unavailable, _, _) -> ok;
-get_block_and_trail(Peers, NewB, _, _) when NewB#block.height =< 1 ->
+	get_block_and_trail(Peers, NewB, ?STORE_BLOCKS_BEHIND_CURRENT, HashList, []).
+
+get_block_and_trail(_, unavailable, _, _, RecentTXs) ->
+	RecentTXs;
+get_block_and_trail(Peers, NewB, _, _, RecentTXs) when NewB#block.height =< 1 ->
 	ar_storage:write_full_block(NewB),
-	PreviousBlock = ar_node:get_block(Peers, NewB#block.previous_block, NewB#block.hash_list),
-	ar_storage:write_block(PreviousBlock);
-get_block_and_trail(_, _, 0, _) -> ok;
-get_block_and_trail(Peers, NewB, BehindCurrent, HashList) ->
-	PreviousBlock = ar_node_utils:get_full_block(Peers, NewB#block.previous_block, NewB#block.hash_list),
+	PreviousBlock = ar_node:get_block(
+		Peers,
+		NewB#block.previous_block,
+		NewB#block.hash_list
+	),
+	ar_storage:write_block(PreviousBlock),
+	[get_block_txids(NewB) | RecentTXs];
+get_block_and_trail(_, _, 0, _, RecentTXs) ->
+	RecentTXs;
+get_block_and_trail(Peers, NewB, BehindCurrent, HashList, RecentTXs) ->
+	PreviousBlock = ar_node_utils:get_full_block(
+		Peers,
+		NewB#block.previous_block,
+		NewB#block.hash_list
+	),
 	case ?IS_BLOCK(PreviousBlock) of
 		true ->
 			RecallBlock = ar_util:get_recall_hash(PreviousBlock, HashList),
 			ar_storage:write_full_block(NewB),
+			NewRecentTXs = [get_block_txids(NewB) | RecentTXs],
 			case ar_node_utils:get_full_block(Peers, RecallBlock, NewB#block.hash_list) of
 				unavailable ->
 					ar:info(
@@ -189,7 +207,7 @@ get_block_and_trail(Peers, NewB, BehindCurrent, HashList) ->
 							retrying
 						]
 					),
-					get_block_and_trail(Peers, NewB, BehindCurrent, HashList);
+					get_block_and_trail(Peers, NewB, BehindCurrent, HashList, NewRecentTXs);
 				RecallB ->
 					ar_storage:write_full_block(RecallB),
 					ar:info(
@@ -200,7 +218,7 @@ get_block_and_trail(Peers, NewB, BehindCurrent, HashList) ->
 							{blocks_to_write, 2 * (BehindCurrent-1)}
 						]
 					),
-					get_block_and_trail(Peers, PreviousBlock, BehindCurrent-1, HashList)
+					get_block_and_trail(Peers, PreviousBlock, BehindCurrent-1, HashList, NewRecentTXs)
 			end;
 		false ->
 			ar:info(
@@ -210,8 +228,22 @@ get_block_and_trail(Peers, NewB, BehindCurrent, HashList) ->
 				]
 			),
 			timer:sleep(3000),
-			get_block_and_trail(Peers, NewB, BehindCurrent, HashList)
+			get_block_and_trail(Peers, NewB, BehindCurrent, HashList, RecentTXs)
 	end.
+
+get_block_txids(B) ->
+	TXIDs = lists:map(
+		fun(TX) ->
+			case TX of
+				TXID when is_binary(TXID) ->
+					TX;
+				Record when is_record(Record, tx) ->
+					Record#tx.id
+			end
+		end,
+		B#block.txs
+	),
+	{B#block.indep_hash, TXIDs}.
 
 %% @doc Fills node to capacity based on weave storage limit.
 fill_to_capacity(Peers, ToWrite) -> fill_to_capacity(Peers, ToWrite, ToWrite).

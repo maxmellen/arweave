@@ -1,5 +1,5 @@
 -module(ar_fork_recovery).
--export([start/4]).
+-export([start/5]).
 -include("ar.hrl").
 -include_lib("eunit/include/eunit.hrl").
 
@@ -19,11 +19,12 @@
 	target_block, % The target block being recovered too
 	recovery_hash_list, % Complete hash list for this fork
 	block_list, % List of hashes of verified blocks
-	hash_list % List of block hashes needing to be verified and applied (lowest to highest)
+	hash_list, % List of block hashes needing to be verified and applied (lowest to highest)
+	recent_txs % List of {BH, TXIDs} pairs of the last N blocks
 }).
 
 %% @doc Start the fork recovery 'catch up' server.
-start(Peers, TargetBShadow, HashList, Parent) ->
+start(Peers, TargetBShadow, HashList, Parent, RecentTXs) ->
 	% TODO: At this stage the target block is not a shadow, it is either
 	% a valid block or a block with a malformed hashlist (Outside FR range).
 	case ?IS_BLOCK(TargetBShadow) of
@@ -50,16 +51,17 @@ start(Peers, TargetBShadow, HashList, Parent) ->
 									lists:reverse(TargetB#block.hash_list),
 									lists:reverse(HashList)
 								) ++ [TargetB#block.indep_hash],
+								BlockList = (TargetB#block.hash_list -- DivergedHashes),
 								server(
 									#state {
 										parent = Parent,
 										peers = Peers,
-										block_list =
-											(TargetB#block.hash_list -- DivergedHashes),
+										block_list = BlockList,
 										hash_list = DivergedHashes,
 										target_block = TargetB,
 										recovery_hash_list =
-											[TargetB#block.indep_hash|TargetB#block.hash_list]
+											[TargetB#block.indep_hash|TargetB#block.hash_list],
+										recent_txs = cut_recent_txs(RecentTXs, hd(BlockList))
 									}
 								)
 							end
@@ -91,6 +93,13 @@ start(Peers, TargetBShadow, HashList, Parent) ->
 drop_until_diverge([X | R1], [X | R2]) -> drop_until_diverge(R1, R2);
 drop_until_diverge(R1, _) -> R1.
 
+cut_recent_txs([{BH, _} | Rest], BH) ->
+	Rest;
+cut_recent_txs([], _) ->
+	[];
+cut_recent_txs([_ | Rest], BH) ->
+	cut_recent_txs(Rest, BH).
+
 %% @doc Subtract the second list from the first. If the first list
 %% is not a superset of the second, return the empty list
 setminus([X | R1], [X | R2]) -> setminus(R1, R2);
@@ -107,10 +116,11 @@ server(#state {
 	}, rejoin) -> ok.
 server(#state {
 		block_list = BlockList,
+		recent_txs = RecentTXs,
 		hash_list = [],
 		parent = Parent
 	}) ->
-	Parent ! {fork_recovered, BlockList};
+	Parent ! {fork_recovered, BlockList, RecentTXs};
 server(S = #state { target_block = TargetB }) ->
 	receive
 		{parent_accepted_block, B} ->
@@ -141,7 +151,8 @@ do_fork_recover(S = #state {
 		hash_list = [NextH | HashList],
 		target_block = TargetB,
 		recovery_hash_list = BHL,
-		parent = Parent
+		parent = Parent,
+		recent_txs = RecentTXs
 	}) ->
 	receive
 	{update_target_block, Block, Peer} ->
@@ -291,10 +302,11 @@ do_fork_recover(S = #state {
 						NextB#block {txs = [T#tx.id || T <- NextB#block.txs]},
 						TXs,
 						B,
-						RecallB
+						RecallB,
+						RecentTXs
 					)
 				of
-					false ->
+					{error, invalid_block} ->
 						ar:report_console(
 							[
 								could_not_validate_fork_block,
@@ -303,13 +315,35 @@ do_fork_recover(S = #state {
 								{recall_block, ?IS_BLOCK(RecallB)}
 							]
 						);
-					true ->
+					{error, tx_replay} ->
+						ar:err([
+							ar_fork_recovery,
+							tx_replay_detected,
+							{
+								block_indep_hash,
+								ar_util:encode(NextB#block.indep_hash)
+							},
+							{
+								txs,
+								lists:map(
+									fun(TX) -> ar_util:encode(TX#tx.id) end,
+									TXs
+								)
+							}
+						]);
+					ok ->
 						ar:info(
 							[
 								{applied_fork_recovery_block, ar_util:encode(NextH)},
 								{block_height, NextB#block.height}
 							]
 						),
+						NewRecentTXs = [
+							{
+								NextB#block.indep_hash,
+								[TX#tx.id || TX <- NextB#block.txs]
+							} | RecentTXs
+						],
 						case ar_meta_db:get(partial_fork_recovery) of
 							true ->
 								ar:info(
@@ -318,7 +352,7 @@ do_fork_recover(S = #state {
 										{height, NextB#block.height}
 									]
 								),
-								Parent ! {fork_recovered, [NextH | BlockList]};
+								Parent ! {fork_recovered, [NextH | BlockList], NewRecentTXs};
 							_ -> do_nothing
 						end,
 						self() ! apply_next_block,
@@ -327,6 +361,7 @@ do_fork_recover(S = #state {
 						server(
 							S#state {
 								block_list = [NextH | BlockList],
+								recent_txs = NewRecentTXs,
 								hash_list = HashList
 							}
 						)
@@ -338,12 +373,7 @@ do_fork_recover(S = #state {
 
 %% @doc Try and apply a new block (NextB) to the current block (B).
 %% Returns	true if the block can be applied, otherwise false.
-try_apply_block(_, NextB, _TXs, B, RecallB) when
-		(not ?IS_BLOCK(NextB)) or
-		(not ?IS_BLOCK(B)) or
-		(not ?IS_BLOCK(RecallB)) ->
-	false;
-try_apply_block(HashList, NextB, TXs, B, RecallB) ->
+try_apply_block(HashList, NextB, TXs, B, RecallB, RecentTXs) ->
 	{FinderReward, _} =
 		ar_node_utils:calculate_reward_pool(
 			B#block.reward_pool,
@@ -357,12 +387,12 @@ try_apply_block(HashList, NextB, TXs, B, RecallB) ->
 		),
 	WalletList =
 		ar_node_utils:apply_mining_reward(
-			ar_node_utils:apply_txs(B#block.wallet_list, TXs),
+			ar_node_utils:apply_txs(B#block.wallet_list, TXs, B#block.height),
 			NextB#block.reward_addr,
 			FinderReward,
 			NextB#block.height
 		),
-	case ar_node_utils:validate(
+	BlockValid = ar_node_utils:validate(
 		HashList,
 		WalletList,
 		NextB,
@@ -371,9 +401,24 @@ try_apply_block(HashList, NextB, TXs, B, RecallB) ->
 		RecallB,
 		NextB#block.reward_addr,
 		NextB#block.tags
-	) of
-		valid -> true;
-		{invalid, _} -> false
+	),
+	case BlockValid of
+		{invalid, _} ->
+			{error, invalid_block};
+		valid ->
+			TXReplayCheck = ar_tx_replay_pool:verify_block_txs(
+				TXs,
+				B#block.diff,
+				B#block.height,
+				B#block.wallet_list,
+				RecentTXs
+			),
+			case TXReplayCheck of
+				invalid ->
+					{error, tx_replay};
+				valid ->
+					ok
+			end
 	end.
 
 %%%
