@@ -13,7 +13,7 @@
 -export([fork_recover/3]).
 -export([validate/5, validate/8, validate_wallet_list/1]).
 -export([calculate_delay/1]).
--export([update_recent_txs/3]).
+-export([update_block_txs_pairs/3]).
 
 -include("ar.hrl").
 
@@ -198,7 +198,7 @@ start_mining(#{
 		txs := TXs,
 		reward_addr := RewardAddr,
 		tags := Tags,
-		recent_txs := RecentTXs } = StateIn, ForceDiff) ->
+		block_txs_pairs := BlockTXPairs } = StateIn, ForceDiff) ->
 	case find_recall_block(BHL) of
 		unavailable ->
 			B = ar_storage:read_block(hd(BHL), BHL),
@@ -269,7 +269,7 @@ start_mining(#{
 						RewardAddr,
 						Tags,
 						Node,
-						RecentTXs
+						BlockTXPairs
 					),
 					ar:info([{node, Node}, {started_miner, Miner}]),
 					StateIn#{ miner => Miner };
@@ -282,7 +282,7 @@ start_mining(#{
 						Tags,
 						ForceDiff,
 						Node,
-						RecentTXs
+						BlockTXPairs
 					),
 					ar:info([{node, Node}, {started_miner, Miner}, {forced_diff, ForceDiff}]),
 					StateIn#{ miner => Miner, diff => ForceDiff }
@@ -306,7 +306,7 @@ integrate_new_block(
 		#{
 			txs := TXs,
 			hash_list := HashList,
-			recent_txs := RecentTXs
+			block_txs_pairs := BlockTXPairs
 		} = StateIn,
 		NewB,
 		BlockTXs) ->
@@ -319,13 +319,13 @@ integrate_new_block(
 	%% Write new block and included TXs to local storage.
 	ar_storage:write_full_block(NewB, BlockTXs),
 	NewBHL = [NewB#block.indep_hash | HashList],
-	NewRecentTXs = update_recent_txs(
+	NewBlockTXPairs = update_block_txs_pairs(
 		NewB#block.indep_hash,
 		[TX#tx.id || TX <- BlockTXs],
-		RecentTXs
+		BlockTXPairs
 	),
 	ValidTXs = ar_tx_replay_pool:pick_txs_to_keep_in_mempool(
-		NewRecentTXs,
+		NewBlockTXPairs,
 		TXs -- BlockTXs,
 		NewB#block.diff,
 		NewB#block.height,
@@ -369,22 +369,22 @@ integrate_new_block(
 			ok
 	end,
 	reset_miner(StateIn#{
-		hash_list			 => NewBHL,
-		current				 => NewB#block.indep_hash,
-		txs					 => ValidTXs,
-		height				 => NewB#block.height,
-		reward_pool			 => NewB#block.reward_pool,
-		diff				 => NewB#block.diff,
-		last_retarget		 => NewB#block.last_retarget,
-		weave_size			 => NewB#block.weave_size,
-		recent_txs			 => NewRecentTXs
+		hash_list       => NewBHL,
+		current         => NewB#block.indep_hash,
+		txs             => ValidTXs,
+		height          => NewB#block.height,
+		reward_pool     => NewB#block.reward_pool,
+		diff            => NewB#block.diff,
+		last_retarget   => NewB#block.last_retarget,
+		weave_size      => NewB#block.weave_size,
+		block_txs_pairs => NewBlockTXPairs
 	}).
 
-update_recent_txs(BH, TXIDs, List) ->
+update_block_txs_pairs(BH, TXIDs, List) ->
 	lists:sublist([{BH, TXIDs} | List], ?MAX_TX_ANCHOR_DEPTH).
 
 %% @doc Recovery from a fork.
-fork_recover(#{ node := Node, hash_list := HashList, recent_txs := RecentTXs } = StateIn, Peer, NewB) ->
+fork_recover(#{ node := Node, hash_list := HashList, block_txs_pairs := BlockTXPairs } = StateIn, Peer, NewB) ->
 	case {whereis(fork_recovery_server), whereis(join_server)} of
 		{undefined, undefined} ->
 			PrioritisedPeers = ar_util:unique(Peer) ++
@@ -399,7 +399,7 @@ fork_recover(#{ node := Node, hash_list := HashList, recent_txs := RecentTXs } =
 					NewB,
 					HashList,
 					Node,
-					RecentTXs
+					BlockTXPairs
 				)
 			),
 			case PID of

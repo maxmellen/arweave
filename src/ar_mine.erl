@@ -12,7 +12,7 @@
 -record(state, {
 	parent, % miners parent process (initiator)
 	current_block, % current block held by node
-	recent_txs, % list of {BH, TXIDs} pairs for latest N blocks
+	block_txs_pairs, % list of {BH, TXIDs} pairs for latest ?MAX_TX_ANCHOR_DEPTH blocks
 	recall_block, % recall block related to current
 	txs, % the set of txs to be mined
 	timestamp, % the block timestamp used for the mining
@@ -29,15 +29,15 @@
 }).
 
 %% @doc Spawns a new mining process and returns its PID.
-start(CurrentB, RecallB, RawTXs, RewardAddr, Tags, Parent, RecentTXs) ->
-	do_start(CurrentB, RecallB, RawTXs, RewardAddr, Tags, auto_update, Parent, RecentTXs).
+start(CurrentB, RecallB, RawTXs, RewardAddr, Tags, Parent, BlockTXPairs) ->
+	do_start(CurrentB, RecallB, RawTXs, RewardAddr, Tags, auto_update, Parent, BlockTXPairs).
 
-start(CurrentB, RecallB, RawTXs, RewardAddr, Tags, StaticDiff, Parent, RecentTXs) when is_integer(StaticDiff) ->
-	do_start(CurrentB, RecallB, RawTXs, RewardAddr, Tags, StaticDiff, Parent, RecentTXs).
+start(CurrentB, RecallB, RawTXs, RewardAddr, Tags, StaticDiff, Parent, BlockTXPairs) when is_integer(StaticDiff) ->
+	do_start(CurrentB, RecallB, RawTXs, RewardAddr, Tags, StaticDiff, Parent, BlockTXPairs).
 
-do_start(CurrentB, RecallB, RawTXs, unclaimed, Tags, Diff, Parent, RecentTXs) ->
-	do_start(CurrentB, RecallB, RawTXs, <<>>, Tags, Diff, Parent, RecentTXs);
-do_start(CurrentB, RecallB, RawTXs, RewardAddr, Tags, Diff, Parent, RecentTXs) ->
+do_start(CurrentB, RecallB, RawTXs, unclaimed, Tags, Diff, Parent, BlockTXPairs) ->
+	do_start(CurrentB, RecallB, RawTXs, <<>>, Tags, Diff, Parent, BlockTXPairs);
+do_start(CurrentB, RecallB, RawTXs, RewardAddr, Tags, Diff, Parent, BlockTXPairs) ->
 	{NewDiff, AutoUpdateDiff} = case Diff of
 		auto_update -> {not_set, true};
 		_ -> {Diff, false}
@@ -53,7 +53,7 @@ do_start(CurrentB, RecallB, RawTXs, RewardAddr, Tags, Diff, Parent, RecentTXs) -
 			max_miners = ar_meta_db:get(max_miners),
 			diff = NewDiff,
 			auto_update_diff = AutoUpdateDiff,
-			recent_txs = RecentTXs
+			block_txs_pairs = BlockTXPairs
 		},
 		RawTXs
 	).
@@ -114,7 +114,7 @@ update_txs(
 		diff = CurrentDiff,
 		data_segment_duration = BDSGenerationDuration,
 		auto_update_diff = AutoUpdateDiff,
-		recent_txs = RecentTXs
+		block_txs_pairs = BlockTXPairs
 	},
 	TXs
 ) ->
@@ -124,7 +124,7 @@ update_txs(
 		false -> CurrentDiff
 	end,
 	ValidTXs = ar_tx_replay_pool:pick_txs_to_mine(
-		RecentTXs,
+		BlockTXPairs,
 		CurrentB#block.height,
 		NextDiff,
 		CurrentB#block.wallet_list,

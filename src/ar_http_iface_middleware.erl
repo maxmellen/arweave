@@ -820,14 +820,14 @@ handle_get_wallet_txs(Addr, EarliestTXID) ->
 %% @doc Returns a list of all TX IDs starting with the last one to EarliestTXID (inclusive)
 %% for the same wallet.
 get_wallet_txs(EarliestTXID, TXIDs) ->
-	get_wallet_txs(EarliestTXID, TXIDs, []).
+	lists:reverse(get_wallet_txs(EarliestTXID, TXIDs, [])).
 
 get_wallet_txs(_EarliestTXID, [], Acc) ->
-	lists:reverse(Acc);
+	Acc;
 get_wallet_txs(EarliestTXID, [TXID | TXIDs], Acc) ->
 	case TXID of
 		EarliestTXID ->
-			lists:reverse([EarliestTXID | Acc]);
+			[EarliestTXID | Acc];
 		_ ->
 			get_wallet_txs(EarliestTXID, TXIDs, [TXID | Acc])
 	end.
@@ -872,12 +872,12 @@ handle_post_tx(Node, TX, Height, MempoolTXs) ->
 
 handle_post_tx(Node, TX, Height, MempoolTXs, WalletList) ->
 	Diff = ar_node:get_current_diff(Node),
-	RecentTXs = ar_node:get_recent_txs(Node),
+	BlockTXPairs = ar_node:get_block_txs_pairs(Node),
 	case ar_tx_replay_pool:verify_tx(
 		TX,
 		Diff,
 		Height,
-		RecentTXs,
+		BlockTXPairs,
 		MempoolTXs,
 		WalletList
 	) of

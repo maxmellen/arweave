@@ -22,7 +22,7 @@
 -export([get_reward_addr/1]).
 -export([get_reward_pool/1]).
 -export([is_joined/1]).
--export([get_recent_txs/1]).
+-export([get_block_txs_pairs/1]).
 
 -export([mine/1, mine_at_diff/2, automine/1, truncate/1]).
 -export([add_tx/2]).
@@ -195,7 +195,7 @@ start(Peers, HashList, MiningDelay, RewardAddr, AutoJoin, Diff, LastRetarget) ->
 				{diff, Diff},
 				{last_retarget, LastRetarget},
 				{weave_size, WeaveSize},
-				{recent_txs, create_recent_txs(HashList)}
+				{block_txs_pairs, create_block_txs_pairs(HashList)}
 			]),
 
 			server(SPid, WPid, queue:new())
@@ -204,16 +204,16 @@ start(Peers, HashList, MiningDelay, RewardAddr, AutoJoin, Diff, LastRetarget) ->
 	ar_http_iface_server:reregister(http_entrypoint_node, PID),
 	PID.
 
-create_recent_txs(not_joined) ->
+create_block_txs_pairs(not_joined) ->
 	[];
-create_recent_txs(BHL) ->
-	create_recent_txs(recent_blocks, lists:sublist(BHL, ?MAX_TX_ANCHOR_DEPTH)).
+create_block_txs_pairs(BHL) ->
+	create_block_txs_pairs(recent_blocks, lists:sublist(BHL, ?MAX_TX_ANCHOR_DEPTH)).
 
-create_recent_txs(recent_blocks, []) ->
+create_block_txs_pairs(recent_blocks, []) ->
 	[];
-create_recent_txs(recent_blocks, BHL = [BH | Rest]) ->
+create_block_txs_pairs(recent_blocks, BHL = [BH | Rest]) ->
 	B = ar_storage:read_block(BH, BHL),
-	[{BH, B#block.txs} | create_recent_txs(Rest)].
+	[{BH, B#block.txs} | create_block_txs_pairs(Rest)].
 
 %% @doc Stop a node server loop and its subprocesses.
 stop(Node) ->
@@ -486,13 +486,13 @@ get_reward_pool(Node) ->
 		after ?LOCAL_NET_TIMEOUT -> 0
 	end.
 
-%% @doc Returns transaction identifiers from the last N blocks
-%% grouped by block hash.
-get_recent_txs(Node) ->
+%% @doc Returns transaction identifiers from the last ?MAX_TX_ANCHOR_DEPTH
+%% blocks grouped by block hash.
+get_block_txs_pairs(Node) ->
 	Ref = make_ref(),
-	Node ! {get_recent_txs, self(), Ref},
+	Node ! {get_block_txs_pairs, self(), Ref},
 	receive
-		{Ref, recent_txs, RecentTXs} -> RecentTXs
+		{Ref, block_txs_pairs, BlockTXPairs} -> BlockTXPairs
 		after ?LOCAL_NET_TIMEOUT -> []
 	end.
 
@@ -716,8 +716,8 @@ handle(SPid, {work_complete, MinedTXs, _Hash, Diff, Nonce, Timestamp}) ->
 				Timestamp
 			}}
 	end;
-handle(_SPid, {fork_recovered, BHL, RecentTXs}) ->
-	{task, {fork_recovered, BHL, RecentTXs}};
+handle(_SPid, {fork_recovered, BHL, BlockTXPairs}) ->
+	{task, {fork_recovered, BHL, BlockTXPairs}};
 handle(_SPid, mine) ->
 	{task, mine};
 handle(_SPid, {mine_at_diff, Diff}) ->
@@ -822,9 +822,9 @@ handle(SPid, {get_reward_addr, From, Ref}) ->
 	{ok, RewardAddr} = ar_node_state:lookup(SPid, reward_addr),
 	From ! {Ref, reward_addr,RewardAddr},
 	ok;
-handle(SPid, {get_recent_txs, From, Ref}) ->
-	{ok, RecentTXs} = ar_node_state:lookup(SPid, recent_txs),
-	From ! {Ref, recent_txs, RecentTXs},
+handle(SPid, {get_block_txs_pairs, From, Ref}) ->
+	{ok, BlockTXPairs} = ar_node_state:lookup(SPid, block_txs_pairs),
+	From ! {Ref, block_txs_pairs, BlockTXPairs},
 	ok;
 %% ----- Server handling. -----
 handle(_SPid, {'DOWN', _, _, _, _}) ->

@@ -37,7 +37,7 @@ start() ->
 		{weave_size, 0},                    % current size of the weave in bytes (only inc. data tx size)
 		{cumulative_diff, 0},               % Sum of the difficulty squared along the current weave
 		{hash_list_merkle, <<>>},           % The Merkle root of the current BHL
-		{recent_txs, []}                    % List of {BH, TXIDs} pairs for last N blocks
+		{block_txs_pairs, []}               % List of {BH, TXIDs} pairs for last ?MAX_TX_ANCHOR_DEPTH blocks
 	]),
 	{ok, Pid}.
 

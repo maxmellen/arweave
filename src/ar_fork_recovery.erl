@@ -20,11 +20,11 @@
 	recovery_hash_list, % Complete hash list for this fork
 	block_list, % List of hashes of verified blocks
 	hash_list, % List of block hashes needing to be verified and applied (lowest to highest)
-	recent_txs % List of {BH, TXIDs} pairs of the last N blocks
+	block_txs_pairs % List of {BH, TXIDs} pairs of the last ?MAX_TX_ANCHOR_DEPTH blocks
 }).
 
 %% @doc Start the fork recovery 'catch up' server.
-start(Peers, TargetBShadow, HashList, Parent, RecentTXs) ->
+start(Peers, TargetBShadow, HashList, Parent, BlockTXPairs) ->
 	% TODO: At this stage the target block is not a shadow, it is either
 	% a valid block or a block with a malformed hashlist (Outside FR range).
 	case ?IS_BLOCK(TargetBShadow) of
@@ -61,7 +61,7 @@ start(Peers, TargetBShadow, HashList, Parent, RecentTXs) ->
 										target_block = TargetB,
 										recovery_hash_list =
 											[TargetB#block.indep_hash|TargetB#block.hash_list],
-										recent_txs = cut_recent_txs(RecentTXs, hd(BlockList))
+										block_txs_pairs = cut_block_txs_pairs(BlockTXPairs, hd(BlockList))
 									}
 								)
 							end
@@ -93,12 +93,12 @@ start(Peers, TargetBShadow, HashList, Parent, RecentTXs) ->
 drop_until_diverge([X | R1], [X | R2]) -> drop_until_diverge(R1, R2);
 drop_until_diverge(R1, _) -> R1.
 
-cut_recent_txs([{BH, _} | Rest], BH) ->
-	Rest;
-cut_recent_txs([], _) ->
+cut_block_txs_pairs(BlockTXPairs = [{BH, _} | _], BH) ->
+	BlockTXPairs;
+cut_block_txs_pairs([], _) ->
 	[];
-cut_recent_txs([_ | Rest], BH) ->
-	cut_recent_txs(Rest, BH).
+cut_block_txs_pairs([_ | Rest], BH) ->
+	cut_block_txs_pairs(Rest, BH).
 
 %% @doc Subtract the second list from the first. If the first list
 %% is not a superset of the second, return the empty list
@@ -116,11 +116,11 @@ server(#state {
 	}, rejoin) -> ok.
 server(#state {
 		block_list = BlockList,
-		recent_txs = RecentTXs,
+		block_txs_pairs = BlockTXPairs,
 		hash_list = [],
 		parent = Parent
 	}) ->
-	Parent ! {fork_recovered, BlockList, RecentTXs};
+	Parent ! {fork_recovered, BlockList, BlockTXPairs};
 server(S = #state { target_block = TargetB }) ->
 	receive
 		{parent_accepted_block, B} ->
@@ -152,7 +152,7 @@ do_fork_recover(S = #state {
 		target_block = TargetB,
 		recovery_hash_list = BHL,
 		parent = Parent,
-		recent_txs = RecentTXs
+		block_txs_pairs = BlockTXPairs
 	}) ->
 	receive
 	{update_target_block, Block, Peer} ->
@@ -303,7 +303,7 @@ do_fork_recover(S = #state {
 						TXs,
 						B,
 						RecallB,
-						RecentTXs
+						BlockTXPairs
 					)
 				of
 					{error, invalid_block} ->
@@ -338,11 +338,11 @@ do_fork_recover(S = #state {
 								{block_height, NextB#block.height}
 							]
 						),
-						NewRecentTXs = [
+						NewBlockTXPairs = [
 							{
 								NextB#block.indep_hash,
 								[TX#tx.id || TX <- NextB#block.txs]
-							} | RecentTXs
+							} | BlockTXPairs
 						],
 						case ar_meta_db:get(partial_fork_recovery) of
 							true ->
@@ -352,7 +352,7 @@ do_fork_recover(S = #state {
 										{height, NextB#block.height}
 									]
 								),
-								Parent ! {fork_recovered, [NextH | BlockList], NewRecentTXs};
+								Parent ! {fork_recovered, [NextH | BlockList], NewBlockTXPairs};
 							_ -> do_nothing
 						end,
 						self() ! apply_next_block,
@@ -361,7 +361,7 @@ do_fork_recover(S = #state {
 						server(
 							S#state {
 								block_list = [NextH | BlockList],
-								recent_txs = NewRecentTXs,
+								block_txs_pairs = NewBlockTXPairs,
 								hash_list = HashList
 							}
 						)
@@ -373,7 +373,7 @@ do_fork_recover(S = #state {
 
 %% @doc Try and apply a new block (NextB) to the current block (B).
 %% Returns	true if the block can be applied, otherwise false.
-try_apply_block(HashList, NextB, TXs, B, RecallB, RecentTXs) ->
+try_apply_block(HashList, NextB, TXs, B, RecallB, BlockTXPairs) ->
 	{FinderReward, _} =
 		ar_node_utils:calculate_reward_pool(
 			B#block.reward_pool,
@@ -411,7 +411,7 @@ try_apply_block(HashList, NextB, TXs, B, RecallB, RecentTXs) ->
 				B#block.diff,
 				B#block.height,
 				B#block.wallet_list,
-				RecentTXs
+				BlockTXPairs
 			),
 			case TXReplayCheck of
 				invalid ->

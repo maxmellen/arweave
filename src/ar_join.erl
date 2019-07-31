@@ -64,11 +64,11 @@ do_join(Node, RawPeers, NewB) ->
 			),
 			ar_miner_log:joining(),
 			ar_randomx_state:init(NewB#block.hash_list, Peers),
-			RecentTXs = get_block_and_trail(Peers, NewB, NewB#block.hash_list),
+			BlockTXPairs = get_block_and_trail(Peers, NewB, NewB#block.hash_list),
 			Node ! {
 				fork_recovered,
 				[NewB#block.indep_hash|NewB#block.hash_list],
-				RecentTXs
+				BlockTXPairs
 			},
 			join_peers(Peers),
 			ar_miner_log:joined(),
@@ -170,14 +170,15 @@ join_peers(Peer) -> ar_http_iface_client:add_peer(Peer).
 %% blocks and recall blocks. Alternatively, if the blocklist is shorter than
 %% ?STORE_BLOCKS_BEHIND_CURRENT, simply get all existing blocks and recall blocks
 get_block_and_trail(_Peers, NewB, []) ->
-	ar_storage:write_block(NewB#block { txs = [T#tx.id || T <- NewB#block.txs] }),
-	[get_block_txids(NewB)];
+	TXIDs = [TX#tx.id || TX <- NewB#block.txs],
+	ar_storage:write_block(NewB#block { txs = TXIDs }),
+	[{NewB#block.indep_hash, TXIDs}];
 get_block_and_trail(Peers, NewB, HashList) ->
 	get_block_and_trail(Peers, NewB, ?STORE_BLOCKS_BEHIND_CURRENT, HashList, []).
 
-get_block_and_trail(_, unavailable, _, _, RecentTXs) ->
-	RecentTXs;
-get_block_and_trail(Peers, NewB, _, _, RecentTXs) when NewB#block.height =< 1 ->
+get_block_and_trail(_, unavailable, _, _, BlockTXPairs) ->
+	BlockTXPairs;
+get_block_and_trail(Peers, NewB, BehindCurrent, _, BlockTXPairs) when NewB#block.height =< 1 ->
 	ar_storage:write_full_block(NewB),
 	PreviousBlock = ar_node:get_block(
 		Peers,
@@ -185,10 +186,17 @@ get_block_and_trail(Peers, NewB, _, _, RecentTXs) when NewB#block.height =< 1 ->
 		NewB#block.hash_list
 	),
 	ar_storage:write_block(PreviousBlock),
-	[get_block_txids(NewB) | RecentTXs];
-get_block_and_trail(_, _, 0, _, RecentTXs) ->
-	RecentTXs;
-get_block_and_trail(Peers, NewB, BehindCurrent, HashList, RecentTXs) ->
+	TXIDs = [TX#tx.id || TX <- NewB#block.txs],
+	NewBlockTXPairs = BlockTXPairs ++ [{NewB#block.indep_hash, TXIDs}],
+	case BehindCurrent of
+		0 ->
+			NewBlockTXPairs;
+		1 ->
+			NewBlockTXPairs ++ [{PreviousBlock#block.indep_hash, PreviousBlock#block.txs}]
+	end;
+get_block_and_trail(_, _, 0, _, BlockTXPairs) ->
+	BlockTXPairs;
+get_block_and_trail(Peers, NewB, BehindCurrent, HashList, BlockTXPairs) ->
 	PreviousBlock = ar_node_utils:get_full_block(
 		Peers,
 		NewB#block.previous_block,
@@ -198,7 +206,8 @@ get_block_and_trail(Peers, NewB, BehindCurrent, HashList, RecentTXs) ->
 		true ->
 			RecallBlock = ar_util:get_recall_hash(PreviousBlock, HashList),
 			ar_storage:write_full_block(NewB),
-			NewRecentTXs = [get_block_txids(NewB) | RecentTXs],
+			TXIDs = [TX#tx.id || TX <- NewB#block.txs],
+			NewBlockTXPairs = BlockTXPairs ++ [{NewB#block.indep_hash, TXIDs}],
 			case ar_node_utils:get_full_block(Peers, RecallBlock, NewB#block.hash_list) of
 				unavailable ->
 					ar:info(
@@ -207,7 +216,7 @@ get_block_and_trail(Peers, NewB, BehindCurrent, HashList, RecentTXs) ->
 							retrying
 						]
 					),
-					get_block_and_trail(Peers, NewB, BehindCurrent, HashList, NewRecentTXs);
+					get_block_and_trail(Peers, NewB, BehindCurrent, HashList, BlockTXPairs);
 				RecallB ->
 					ar_storage:write_full_block(RecallB),
 					ar:info(
@@ -218,7 +227,7 @@ get_block_and_trail(Peers, NewB, BehindCurrent, HashList, RecentTXs) ->
 							{blocks_to_write, 2 * (BehindCurrent-1)}
 						]
 					),
-					get_block_and_trail(Peers, PreviousBlock, BehindCurrent-1, HashList, NewRecentTXs)
+					get_block_and_trail(Peers, PreviousBlock, BehindCurrent-1, HashList, NewBlockTXPairs)
 			end;
 		false ->
 			ar:info(
@@ -228,22 +237,8 @@ get_block_and_trail(Peers, NewB, BehindCurrent, HashList, RecentTXs) ->
 				]
 			),
 			timer:sleep(3000),
-			get_block_and_trail(Peers, NewB, BehindCurrent, HashList, RecentTXs)
+			get_block_and_trail(Peers, NewB, BehindCurrent, HashList, BlockTXPairs)
 	end.
-
-get_block_txids(B) ->
-	TXIDs = lists:map(
-		fun(TX) ->
-			case TX of
-				TXID when is_binary(TXID) ->
-					TX;
-				Record when is_record(Record, tx) ->
-					Record#tx.id
-			end
-		end,
-		B#block.txs
-	),
-	{B#block.indep_hash, TXIDs}.
 
 %% @doc Fills node to capacity based on weave storage limit.
 fill_to_capacity(Peers, ToWrite) -> fill_to_capacity(Peers, ToWrite, ToWrite).

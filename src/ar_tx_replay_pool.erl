@@ -30,8 +30,8 @@
 %% data size. Therefore, the function is suitable for on-edge verification
 %% where we want to accept potentially conflicting transactions to avoid
 %% consensus issues later.
-verify_tx(TX, Diff, Height, RecentTXs, MempoolTXs, WalletList) ->
-	WeaveState = create_state(RecentTXs),
+verify_tx(TX, Diff, Height, BlockTXPairs, MempoolTXs, WalletList) ->
+	WeaveState = create_state(BlockTXPairs),
 	TXIDSet = sets:from_list(
 		[MempoolTX#tx.id || MempoolTX <- MempoolTXs]
 	),
@@ -51,8 +51,8 @@ verify_tx(TX, Diff, Height, RecentTXs, MempoolTXs, WalletList) ->
 %% @doc Verify the transactions are valid for the block taken into account
 %% the given current difficulty and height, the previous blocks' wallet list,
 %% and recent weave transactions.
-verify_block_txs(TXs, Diff, Height, WalletList, RecentTXs) ->
-	WeaveState = create_state(RecentTXs),
+verify_block_txs(TXs, Diff, Height, WalletList, BlockTXPairs) ->
+	WeaveState = create_state(BlockTXPairs),
 	{VerifiedTXs, _, _} = apply_txs(
 		TXs,
 		Diff,
@@ -75,10 +75,10 @@ verify_block_txs(TXs, Diff, Height, WalletList, RecentTXs) ->
 %% exceed the block size limit. Before a valid subset of transactions is chosen,
 %% transactions are sorted from biggest to smallest and then from oldest
 %% block anchors to newest.
-pick_txs_to_mine(RecentTXs, Height, Diff, WalletList, TXs) ->
+pick_txs_to_mine(BlockTXPairs, Height, Diff, WalletList, TXs) ->
 	case ar_fork:height_1_8() of
 		H when Height >= H ->
-			pick_txs_to_mine_post_1_8(RecentTXs, Height, Diff, WalletList, TXs);
+			pick_txs_to_mine_post_1_8(BlockTXPairs, Height, Diff, WalletList, TXs);
 		_ ->
 			pick_txs_to_mine_pre_1_8(Height, Diff, WalletList, TXs)
 	end.
@@ -87,8 +87,8 @@ pick_txs_to_mine(RecentTXs, Height, Diff, WalletList, TXs) ->
 %% accepted. Transactions are verified independently from each other
 %% taking into account the given difficulty and height of the new block,
 %% the new recent weave transactions, and the new wallet list.
-pick_txs_to_keep_in_mempool(RecentTXs, TXs, Diff, Height, WalletList) ->
-	WeaveState = create_state(RecentTXs),
+pick_txs_to_keep_in_mempool(BlockTXPairs, TXs, Diff, Height, WalletList) ->
+	WeaveState = create_state(BlockTXPairs),
 	Mempool = #mempool{},
 	lists:filter(
 		fun(TX) ->
@@ -112,8 +112,8 @@ pick_txs_to_keep_in_mempool(RecentTXs, TXs, Diff, Height, WalletList) ->
 
 %% PRIVATE
 
-create_state(RecentTXs) ->
-	MaxDepthTXs = lists:sublist(RecentTXs, ?MAX_TX_ANCHOR_DEPTH),
+create_state(BlockTXPairs) ->
+	MaxDepthTXs = lists:sublist(BlockTXPairs, ?MAX_TX_ANCHOR_DEPTH),
 	{BHL, Map} = lists:foldr(
 		fun({BH, TXIDs}, {BHL, Map}) ->
 			{[BH | BHL], maps:put(BH, sets:from_list(TXIDs), Map)}
@@ -134,7 +134,7 @@ verify_tx(general_verification, TX, Diff, Height, FloatingWalletList, WeaveState
 			{invalid, tx_verification_failed}
 	end;
 verify_tx(last_tx_in_mempool, TX, Diff, Height, FloatingWalletList, WeaveState, Mempool) ->
-	case ar_fork:height_1_8() of
+	ShouldContinue = case ar_fork:height_1_8() of
 		H when Height >= H ->
 			%% Only verify after fork 1.8 otherwise it causes a soft fork
 			%% since current nodes can accept blocks with a chain of last_tx
@@ -144,17 +144,13 @@ verify_tx(last_tx_in_mempool, TX, Diff, Height, FloatingWalletList, WeaveState, 
 				true ->
 					{invalid, last_tx_in_mempool};
 				false ->
-					verify_tx(
-						last_tx,
-						TX,
-						Diff,
-						Height,
-						FloatingWalletList,
-						WeaveState,
-						Mempool
-					)
+					continue
 			end;
 		_ ->
+			continue
+	end,
+	case ShouldContinue of
+		continue ->
 			verify_tx(
 				last_tx,
 				TX,
@@ -163,7 +159,9 @@ verify_tx(last_tx_in_mempool, TX, Diff, Height, FloatingWalletList, WeaveState, 
 				FloatingWalletList,
 				WeaveState,
 				Mempool
-			)
+			);
+		{invalid, Reason} ->
+			{invalid, Reason}
 	end;
 verify_tx(last_tx, TX, Diff, Height, FloatingWalletList, WeaveState, Mempool) ->
 	case ar_tx:check_last_tx(FloatingWalletList, TX) of
@@ -232,8 +230,8 @@ apply_txs(TXs, Diff, Height, WalletList, WeaveState, Mempool) ->
 		TXs
 	).
 
-pick_txs_to_mine_post_1_8(RecentTXs, Height, Diff, WalletList, TXs) ->
-	WeaveState = create_state(RecentTXs),
+pick_txs_to_mine_post_1_8(BlockTXPairs, Height, Diff, WalletList, TXs) ->
+	WeaveState = create_state(BlockTXPairs),
 	{VerifiedTXs, _, _} = apply_txs(
 		TXs,
 		Diff,
