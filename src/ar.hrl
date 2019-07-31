@@ -168,6 +168,21 @@
 %% @doc Length of time to wait (seconds) before dropping after last activity
 -define(PEER_TIMEOUT, 8 * 60).
 
+%% @doc A part of transaction propagation delay independent from the size.
+-ifdef(DEBUG).
+-define(BASE_TX_PROPAGATION_DELAY, 0). % seconds
+-else.
+-define(BASE_TX_PROPAGATION_DELAY, 30). % seconds
+-endif.
+
+%% @doc A conservative assumption of the network speed used to
+%% estimate the transaction propagation delay.
+-ifdef(DEBUG).
+-define(TX_PROPAGATION_BITS_PER_SECOND, 1000000000).
+-else.
+-define(TX_PROPAGATION_BITS_PER_SECOND, 100000). % 100 kbps
+-endif.
+
 %% @doc The number of the best peers to send new transactions to in parallel.
 -define(TX_PROPAGATION_PARALLELIZATION, 5).
 
