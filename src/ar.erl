@@ -531,7 +531,10 @@ init(Args) ->
 
 %% @doc Run all of the tests associated with the core project.
 tests() ->
-	tests(?CORE_TEST_MODS, #config {}).
+	case tests(?CORE_TEST_MODS, #config {}) of
+		ok -> ok;
+		_ -> halt(1)
+	end.
 
 tests(Mods, Config) when is_list(Mods) ->
 	case ?DEFAULT_DIFF of
