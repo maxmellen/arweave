@@ -1,0 +1,10 @@
+language: erlang
+otp_release:
+  - 20.3
+env:
+  - AR=gcc-ar
+install:
+  - "sed -i'' 's/^%\\(-define(DEBUG, debug).\\)$/\\1/' src/ar.hrl"
+  - make build_test
+script:
+  - make test
