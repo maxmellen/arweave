@@ -4,6 +4,8 @@
 
 -include("ar.hrl").
 
+-define(MANIFEST_CONTENT_TYPE, <<"application/x.arweave-manifest+json">>).
+
 %%%===================================================================
 %%% Cowboy middleware callback.
 %%%===================================================================
@@ -73,17 +75,8 @@ execute(Req, #{ gateway := {Domain, CustomDomains} } = Env) ->
 
 handle_apex_request(Req, Env) ->
 	case resolve_path(cowboy_req:path(Req)) of
-		{tx, TXID, _} -> derive_label_and_redirect(TXID, Req, Env);
-		other -> other_request(Req, Env);
-		root -> bad_request(Req);
-		invalid -> bad_request(Req);
-		not_found -> not_found(Req)
-	end.
-
-handle_labeled_request(Label, Req, Env) ->
-	case resolve_path(cowboy_req:path(Req)) of
-		{tx, TXID, Filename} ->
-			handle_labeled_request_1(Label, TXID, Filename, Req, Env);
+		{tx, TXID, _, SubPath} ->
+			derive_label_and_redirect(TXID, SubPath, Req, Env);
 		other ->
 			other_request(Req, Env);
 		root ->
@@ -94,32 +87,46 @@ handle_labeled_request(Label, Req, Env) ->
 			not_found(Req)
 	end.
 
-handle_labeled_request_1(Label, TXID, Filename, Req, Env) ->
-	case get_tx_block_hash(TXID) of
-		{ok, BH} ->
-			handle_labeled_request_2(Label, TXID, Filename, BH, Req, Env);
+handle_labeled_request(Label, Req, Env) ->
+	case resolve_path(cowboy_req:path(Req)) of
+		{tx, TXID, Filename, SubPath} ->
+			handle_labeled_request_1(Label, TXID, Filename, SubPath, Req, Env);
+		other ->
+			other_request(Req, Env);
+		root ->
+			bad_request(Req);
+		invalid ->
+			bad_request(Req);
 		not_found ->
 			not_found(Req)
 	end.
 
-handle_labeled_request_2(Label, TXID, Filename, BH, Req, Env) ->
-	case ar_domain:derive_tx_label(TXID, BH) of
-		Label ->
-			handle_labeled_request_3(Label, TXID, Filename, Req, Env);
-		OtherLabel ->
-			redirect_to_labeled_tx(OtherLabel, TXID, Req, Env)
+handle_labeled_request_1(Label, TXID, Filename, SubPath, Req, Env) ->
+	case get_tx_block_hash(TXID) of
+		{ok, BH} ->
+			handle_labeled_request_2(Label, TXID, Filename, BH, SubPath, Req, Env);
+		not_found ->
+			not_found(Req)
 	end.
 
-handle_labeled_request_3(Label, TXID, Filename, Req, Env) ->
+handle_labeled_request_2(Label, TXID, Filename, BH, SubPath, Req, Env) ->
+	case ar_domain:derive_tx_label(TXID, BH) of
+		Label ->
+			handle_labeled_request_3(Label, TXID, Filename, SubPath, Req, Env);
+		OtherLabel ->
+			redirect_to_labeled_tx(OtherLabel, TXID, SubPath, Req, Env)
+	end.
+
+handle_labeled_request_3(Label, TXID, Filename, SubPath, Req, Env) ->
 	case cowboy_req:scheme(Req) of
-		<<"https">> -> serve_tx(Filename, Req);
-		<<"http">> -> redirect_to_labeled_tx(Label, TXID, Req, Env)
+		<<"https">> -> serve_tx(Filename, SubPath, Req);
+		<<"http">> -> redirect_to_labeled_tx(Label, TXID, SubPath, Req, Env)
 	end.
 
 handle_custom_request(CustomDomain, Req, Env) ->
 	case resolve_path(cowboy_req:path(Req)) of
 		root -> handle_custom_request_1(CustomDomain, Req);
-		{tx, TXID, _} -> derive_label_and_redirect(TXID, Req, Env);
+		{tx, TXID, _, SubPath} -> derive_label_and_redirect(TXID, SubPath, Req, Env);
 		other -> other_request(Req, Env);
 		invalid -> bad_request(Req)
 	end.
@@ -132,21 +139,28 @@ handle_unknown_request(Req, Env) ->
 
 resolve_path(Path) ->
 	case ar_http_iface_server:split_path(Path) of
-		[] -> root;
-		[<<Hash:43/bytes>>] -> resolve_path_1(Hash);
-		[_ | _] -> other
+		[] ->
+			root;
+		[<<Hash:43/bytes>> | SubPathSegments] ->
+			resolve_path_1(Hash, SubPathSegments);
+		[_ | _] ->
+			other
 	end.
 
-resolve_path_1(Hash) ->
+resolve_path_1(Hash, SubPathSegments) ->
 	case get_tx_from_hash(Hash) of
-		{ok, TXID, Filename} -> {tx, TXID, Filename};
-		invalid -> other;
-		not_found -> not_found
+		{ok, TXID, Filename} ->
+			SubPath = list_to_binary(lists:join(<<"/">>, SubPathSegments)),
+			{tx, TXID, Filename, SubPath};
+		invalid ->
+			other;
+		not_found ->
+			not_found
 	end.
 
-derive_label_and_redirect(TXID, Req, Env) ->
+derive_label_and_redirect(TXID, SubPath, Req, Env) ->
 	case get_tx_block_hash(TXID) of
-		{ok, BH} -> derive_label_and_redirect_1(TXID, BH, Req, Env);
+		{ok, BH} -> derive_label_and_redirect_1(TXID, BH, SubPath, Req, Env);
 		not_found -> not_found(Req)
 	end.
 
@@ -157,22 +171,26 @@ get_tx_block_hash(TXID) ->
 	end.
 
 get_tx_block_hash_1(PseudoTags) ->
-	case proplists:get_value(<<"block_indep_hash">>, PseudoTags) of
-		undefined -> not_found;
-		BH -> {ok, BH}
+	case lists:keyfind(<<"block_indep_hash">>, 1, PseudoTags) of
+		{<<"block_indep_hash">>, BH} -> {ok, BH};
+		false -> not_found
 	end.
 
-derive_label_and_redirect_1(TXID, BH, Req, Env) ->
+derive_label_and_redirect_1(TXID, BH, SubPath, Req, Env) ->
 	Label = ar_domain:derive_tx_label(TXID, BH),
-	redirect_to_labeled_tx(Label, TXID, Req, Env).
+	redirect_to_labeled_tx(Label, TXID, SubPath, Req, Env).
 
-redirect_to_labeled_tx(Label, TXID, Req, #{ gateway := {Domain, _} }) ->
+redirect_to_labeled_tx(Label, TXID, SubPath, Req, #{ gateway := {Domain, _} }) ->
 	Hash = ar_util:encode(TXID),
+	Path = case SubPath of
+		<<>> -> Hash;
+		_ -> list_to_binary([Hash, <<"/">>, SubPath])
+	end,
 	Location = <<
 		"https://",
 		Label/binary, ".",
 		Domain/binary, "/",
-		Hash/binary
+		Path/binary
 	>>,
 	{stop, cowboy_req:reply(301, #{<<"location">> => Location}, Req)}.
 
@@ -213,7 +231,7 @@ handle_custom_request_2(CustomDomain, Req) ->
 
 handle_custom_request_3(TxtRecord, Req) ->
 	case get_tx_from_hash(TxtRecord) of
-		{ok, _, Filename} -> serve_tx(Filename, Req);
+		{ok, _, Filename} -> serve_tx(Filename, <<>>, Req);
 		invalid -> domain_improperly_configured(Req);
 		not_found -> domain_improperly_configured(Req)
 	end.
@@ -237,11 +255,82 @@ get_tx_from_hash_1(TXID) ->
 		Filename -> {ok, TXID, Filename}
 	end.
 
-serve_tx(Filename, Req) ->
+serve_tx(Filename, SubPath, Req) ->
 	TX = ar_storage:read_tx_file(Filename),
-	ContentType = proplists:get_value(<<"Content-Type">>, TX#tx.tags, "text/html"),
-	Headers = #{<<"content-type">> => ContentType},
+	ContentType =
+		case lists:keyfind(<<"Content-Type">>, 1, TX#tx.tags) of
+			{<<"Content-Type">>, V} -> V;
+			false -> <<"text/html">>
+		end,
+	case {ContentType, SubPath} of
+		{?MANIFEST_CONTENT_TYPE, <<>>} ->
+			serve_manifest_default(TX, Req);
+		{?MANIFEST_CONTENT_TYPE, _} ->
+			serve_manifest_path(TX, SubPath, Req);
+		{_, <<>>} ->
+			serve_plain_tx(TX, ContentType, Req);
+		_ ->
+			bad_request(Req)
+	end.
+
+serve_manifest_default(TX, Req) ->
+	case ar_serialize:json_decode(TX#tx.data, [return_maps]) of
+		{ok, #{ <<"default">> := Default }} -> serve_manifest_default_1(Default, Req);
+		{error, _} -> misdirected_request(Req)
+	end.
+
+serve_manifest_default_1(Default, Req) ->
+	Hostname = cowboy_req:host(Req),
+	Path = cowboy_req:path(Req),
+	Location = <<
+		"https://",
+		Hostname/binary,
+		Path/binary, "/",
+		Default/binary
+	>>,
+	{stop, cowboy_req:reply(301, #{<<"location">> => Location}, Req)}.
+
+serve_manifest_path(TX, SubPath, Req) ->
+	case ar_serialize:json_decode(TX#tx.data, [return_maps]) of
+		{ok, #{ <<"paths">> := Paths} } when is_map(Paths) ->
+			serve_manifest_path_1(Paths, SubPath, Req);
+		{ok, _} ->
+			misdirected_request(Req);
+		{error, _} ->
+			misdirected_request(Req)
+	end.
+
+serve_manifest_path_1(Paths, SubPath, Req) ->
+	case Paths of
+		#{ SubPath := #{ <<"id">> := Hash } } ->
+			serve_manifest_path_2(Hash, Req);
+		#{ SubPath := _ } ->
+			misdirected_request(Req);
+		#{} ->
+			not_found(Req)
+	end.
+
+serve_manifest_path_2(Hash, Req) ->
+	case get_tx_from_hash(Hash) of
+		{ok, _, SubFilename} -> serve_manifest_path_3(SubFilename, Req);
+		_ -> misdirected_request(Req)
+	end.
+
+serve_manifest_path_3(SubFilename, Req) ->
+	SubTX = ar_storage:read_tx_file(SubFilename),
+	ContentType =
+		case lists:keyfind(<<"Content-Type">>, 1, SubTX#tx.tags) of
+			{<<"Content-Type">>, V} -> V;
+			false -> <<"text/html">>
+		end,
+	serve_plain_tx(SubTX, ContentType, Req).
+
+serve_plain_tx(TX, ContentType, Req) ->
+	Headers = #{ <<"content-type">> => ContentType },
 	{stop, cowboy_req:reply(200, Headers, TX#tx.data, Req)}.
+
+misdirected_request(Req) ->
+	{stop, cowboy_req:reply(421, Req)}.
 
 domain_improperly_configured(Req) ->
 	{stop, cowboy_req:reply(502, #{}, <<"Domain improperly configured">>, Req)}.
